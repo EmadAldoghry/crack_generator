@@ -40,34 +40,28 @@ def create_crack_mask_from_line(image_shape, start_point, end_point,
     start_x, start_y = int(start_point[0]), int(start_point[1])
     end_x, end_y = int(end_point[0]), int(end_point[1])
 
-    # Generate points along the line
-    num_points = int(np.hypot(end_x - start_x, end_y - end_y)) * 2 # More points for smoother curves
+    num_points = int(np.hypot(end_x - start_x, end_y - end_y)) * 2 
     if num_points < 2: num_points = 2
     line_x = np.linspace(start_x, end_x, num_points)
     line_y = np.linspace(start_y, end_y, num_points)
 
-    # Calculate perpendicular deviations using Perlin noise
-    # Normalize line progress for Perlin noise input
     progress = np.linspace(0, 1, num_points)
-    
-    # Ensure 'repeat' is large enough for pnoise1, e.g., num_points or a fixed large value
     perlin_repeat = max(num_points, 1024)
 
-    deviations = pnoise1_array(progress * 10, # Multiply progress to get more variations
+    deviations = pnoise1_array(progress * 10, 
                                octaves=waviness_octaves,
                                persistence=waviness_persistence,
                                lacunarity=waviness_lacunarity,
                                base=perlin_base,
                                repeat=perlin_repeat)
 
-    deviations = (deviations - np.min(deviations)) / (np.max(deviations) - np.min(deviations) + 1e-6) # Normalize 0-1
-    deviations = (deviations - 0.5) * 2 * waviness_scale # Scale and center
+    deviations = (deviations - np.min(deviations)) / (np.max(deviations) - np.min(deviations) + 1e-6) 
+    deviations = (deviations - 0.5) * 2 * waviness_scale 
 
-    # Vector perpendicular to the line
     dx = end_x - start_x
     dy = end_y - start_y
     line_length = np.hypot(dx, dy)
-    if line_length == 0: line_length = 1 # Avoid division by zero
+    if line_length == 0: line_length = 1 
 
     norm_dx = dx / line_length
     norm_dy = dy / line_length
@@ -78,94 +72,113 @@ def create_crack_mask_from_line(image_shape, start_point, end_point,
     crack_points_x = line_x + perp_dx * deviations
     crack_points_y = line_y + perp_dy * deviations
     
-    # Ensure points are within bounds
     crack_points_x = np.clip(crack_points_x, 0, width - 1).astype(int)
     crack_points_y = np.clip(crack_points_y, 0, height - 1).astype(int)
 
-    # Draw the crack path with varying thickness
     for i in range(len(crack_points_x) - 1):
-        # Width variation using Perlin noise along the crack length
         current_width_noise_val = noise.pnoise1(progress[i] / width_variation_scale,
                                                 octaves=2, persistence=0.5, lacunarity=2.0,
                                                 base=perlin_base + 1, repeat=perlin_repeat)
-        # Normalize noise from approx -0.7 to 0.7 to 0-1
         normalized_width_noise = (current_width_noise_val / 0.7 + 1) / 2
         
-        current_thickness = int(crack_avg_width * (1 - width_variation_strength + width_variation_strength * normalized_width_noise * 2))
-        current_thickness = max(1, current_thickness)
+        float_thickness = crack_avg_width * (1 - width_variation_strength + width_variation_strength * normalized_width_noise * 2)
+        
+        current_thickness = int(round(float_thickness)) 
+        current_thickness = max(1, current_thickness) 
 
         pt1 = (crack_points_x[i], crack_points_y[i])
         pt2 = (crack_points_x[i+1], crack_points_y[i+1])
-        cv2.line(mask, pt1, pt2, 255, thickness=current_thickness, lineType=cv2.LINE_AA)
-
-    # Optional: Further morphological operations like in original create_crack_shape
-    # e.g., small random erosions/dilations on segments if desired for more detail.
-    # For simplicity, we'll skip the windowed approach for now.
+        # MODIFICATION: Try LINE_8 for a potentially crisper 1-pixel line in the mask
+        cv2.line(mask, pt1, pt2, 255, thickness=current_thickness, lineType=cv2.LINE_8) # Changed from LINE_AA
 
     return mask
 
 
 def apply_crack_to_image(base_image, crack_binary_mask,
-                         intensity_avg=0.65, # Darker cracks (0.0) vs lighter (1.0)
-                         intensity_std=0.05, # Variation in darkness
-                         fade_kernel_size_min=3, # Min blur kernel for edges
-                         fade_kernel_size_max=7, # Max blur kernel for edges
-                         rng_seed=None):
+                         intensity_avg=0.65, 
+                         intensity_std=0.05, 
+                         fade_kernel_size_min=1, # Default as per your provided code
+                         fade_kernel_size_max=1, # Default as per your provided code
+                         rng_seed=None,
+                         target_crack_avg_width=1.0):
     """
     Applies the crack to the base image, modifying pixel intensities.
-    This adapts logic from syncrack_generator.image_generation.add_crack.
+    For thin cracks (target_crack_avg_width < THIN_CRACK_THRESHOLD),
+    the user-defined intensity_avg is used directly, and blur is kept minimal.
     """
     if rng_seed is not None:
         rng = np.random.default_rng(rng_seed)
     else:
         rng = np.random.default_rng()
 
-    output_image = base_image.astype(np.float32) / 255.0 # Work with float 0-1
+    # FIRST: Check if the binary mask has any activated pixels
+    if np.sum(crack_binary_mask) == 0:
+        # print("Warning: crack_binary_mask is empty. No crack will be applied.")
+        return base_image.copy() # Return a copy of the original image if mask is empty
 
-    # Create a float mask for intensity modification
-    # Values closer to 0 mean darker crack, 1 means no change
-    intensity_mask = np.ones(base_image.shape[:2], dtype=np.float32)
+    output_image = base_image.astype(np.float32) / 255.0 
+    intensity_mask_values = np.ones(base_image.shape[:2], dtype=np.float32) 
 
     crack_pixels_y, crack_pixels_x = np.where(crack_binary_mask == 255)
 
+    current_intensity_avg = intensity_avg # Start with the user-provided intensity_avg
+    current_fade_kernel_min = fade_kernel_size_min
+    current_fade_kernel_max = fade_kernel_size_max
+
+    # You might need to tune this THIN_CRACK_THRESHOLD
+    # If cracks are visible at width 3, maybe this threshold should be around 2.5 or 3.0
+    THIN_CRACK_THRESHOLD = 3.0 # Adjusted based on "visible > 3" feedback
+
+    if target_crack_avg_width < THIN_CRACK_THRESHOLD:
+        # For thin cracks, USE THE PROVIDED intensity_avg DIRECTLY.
+        # The "fainter" logic was making them too invisible when intensity_avg is already low.
+        # current_intensity_avg is already set to intensity_avg, so no change needed here for that.
+        
+        # Ensure blur is minimal for these thin cracks
+        # Force a very small kernel. Given defaults are 1,1 this will result in 1 or 3.
+        current_fade_kernel_min = min(3, fade_kernel_size_min) 
+        current_fade_kernel_max = max(current_fade_kernel_min, 3) # Effectively kernel can be 1 or 3
+
+        # If you want to absolutely force a 1x1 or 3x3 kernel for thin cracks:
+        # current_fade_kernel_min = 1 # or 3
+        # current_fade_kernel_max = 1 # or 3
+        
+        # print(f"Thin crack (w={target_crack_avg_width:.2f}): using intensity_avg={current_intensity_avg:.2f}, kernel_min={current_fade_kernel_min}, kernel_max={current_fade_kernel_max}")
+    # else:
+        # print(f"Thick crack (w={target_crack_avg_width:.2f}): using intensity_avg={current_intensity_avg:.2f}, kernel_min={current_fade_kernel_min}, kernel_max={current_fade_kernel_max}")
+
+
     for y, x in zip(crack_pixels_y, crack_pixels_x):
-        # Random intensity for each crack pixel based on global average
-        pixel_intensity_multiplier = rng.normal(intensity_avg, intensity_std)
-        intensity_mask[y, x] = np.clip(pixel_intensity_multiplier, 0.01, 0.99) # Ensure it darkens
+        pixel_intensity_multiplier = rng.normal(current_intensity_avg, intensity_std)
+        intensity_mask_values[y, x] = np.clip(pixel_intensity_multiplier, 0.01, 0.99)
 
-    # Blurring/fading the edges of the crack for realism
-    # Create a slightly blurred version for soft transitions
-    kernel_size = rng.integers(fade_kernel_size_min, fade_kernel_size_max + 1)
-    if kernel_size % 2 == 0: kernel_size +=1 # Ensure odd kernel
-    
-    # Apply blur only to the crack region to create faded edges
-    # This is a simplified fading compared to the complex windowed one in syncrack
-    temp_intensity_for_blur = np.ones_like(intensity_mask)
-    temp_intensity_for_blur[crack_pixels_y, crack_pixels_x] = intensity_mask[crack_pixels_y, crack_pixels_x]
 
-    blurred_intensity_mask = cv2.GaussianBlur(temp_intensity_for_blur, (kernel_size, kernel_size), 0)
+    kernel_size_val = rng.integers(current_fade_kernel_min, current_fade_kernel_max + 1)
+    if kernel_size_val == 0: # Should not happen with current logic if min >= 1
+        kernel_size_val = 1 
+    if kernel_size_val % 2 == 0: kernel_size_val +=1 
     
-    # Combine: use original intensity for core crack, blurred for edges
-    # This ensures core crack isn't too faded by a large blur
-    final_intensity_mask = np.ones_like(intensity_mask)
-    # Where original binary mask is, use the potentially sharper intensity_mask values
-    final_intensity_mask[crack_pixels_y, crack_pixels_x] = intensity_mask[crack_pixels_y, crack_pixels_x] 
-    # Blend with blurred mask outside the core binary mask to smooth transitions
-    # A more sophisticated blending might be needed for perfect results
-    # For now, let's use the blurred mask globally and then reinforce the core
+    temp_intensity_for_blur = np.ones_like(intensity_mask_values)
+    temp_intensity_for_blur[crack_pixels_y, crack_pixels_x] = intensity_mask_values[crack_pixels_y, crack_pixels_x]
+
+    # If kernel_size_val is 1, GaussianBlur with sigma 0 effectively does nothing or minimal change.
+    # If you want NO blur for kernel_size_val == 1, you could skip this step.
+    if kernel_size_val > 1:
+        blurred_intensity_mask = cv2.GaussianBlur(temp_intensity_for_blur, (kernel_size_val, kernel_size_val), 0)
+    else:
+        blurred_intensity_mask = temp_intensity_for_blur.copy() # No blur if kernel is 1
+    
     final_intensity_mask = blurred_intensity_mask
-    # Reinforce core crack if blur was too strong
+    # Reinforce: ensure core crack pixels are at least as dark as intended before blur
     final_intensity_mask[crack_pixels_y, crack_pixels_x] = np.minimum(
         final_intensity_mask[crack_pixels_y, crack_pixels_x],
-        intensity_mask[crack_pixels_y, crack_pixels_x] # Take the darker (smaller) value
+        intensity_mask_values[crack_pixels_y, crack_pixels_x] 
     )
 
-
-    # Apply the intensity mask to all channels
     if len(output_image.shape) == 3:
         for c in range(output_image.shape[2]):
             output_image[..., c] *= final_intensity_mask
-    else: # Grayscale
+    else: 
         output_image *= final_intensity_mask
 
     return (np.clip(output_image, 0, 1) * 255).astype(np.uint8)

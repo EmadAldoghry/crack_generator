@@ -15,9 +15,9 @@ def run_crack_painter_with_hardcoded_inputs():
     output_image_path = "crack_generator/data/cracked_img.png" # <--- CHANGE THIS IF NEEDED
 
     # Crack appearance parameters
-    crack_avg_width = 3
-    crack_waviness_scale = 5.0 # How much the crack deviates (larger is more wavy)
-    crack_intensity_avg = 0.05 # Darkness of the crack (0.0 very dark, 1.0 invisible)
+    crack_avg_width = 0.5
+    crack_waviness_scale = 1.0 # How much the crack deviates (larger is more wavy)
+    crack_intensity_avg = 0.5 # Darkness of the crack (0.0 very dark, 1.0 invisible)
     random_seed = None # Use None for random, or a number for reproducibility
     # --- End of hardcoded inputs ---
 
@@ -126,8 +126,12 @@ def run_crack_painter_with_hardcoded_inputs():
         image_with_cracks = apply_crack_to_image(
             base_image=image_with_cracks,
             crack_binary_mask=crack_mask,
-            intensity_avg=crack_intensity_avg,
-            rng_seed=current_crack_seed
+            intensity_avg=crack_intensity_avg, # Original intensity average
+            # intensity_std is already a default parameter in apply_crack_to_image
+            # fade_kernel_size_min/max are also defaults
+            rng_seed=current_crack_seed,
+            # ---- ADD THIS LINE ----
+            target_crack_avg_width=crack_avg_width # Pass the user-defined average width
         )
 
     try:
